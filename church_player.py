@@ -476,25 +476,28 @@ class MainWindow(QMainWindow):
         table = self.tables[kind]
 
         order = ",".join(str(i["id"]) for i in items)
-        if order == self._last_order[kind]:
-            # Same order -- just refresh selection/current highlighting
-            for row in range(table.rowCount()):
-                song_item = table.item(row, COL_SONG)
-                if song_item is None:
-                    continue
-                track_id = song_item.data(ID_ROLE)
-                is_current = track_id == current_id
-                for col in range(table.columnCount()):
-                    item = table.item(row, col)
-                    if item is not None:
-                        item.setForeground(Qt.white if is_current else (Qt.gray if col != COL_SONG else Qt.white))
-            return
+        if order != self._last_order[kind]:
+            self._last_order[kind] = order
+            table.setRowCount(0)
+            for item in items:
+                self._add_row(table, item["song"], item.get("artist", ""),
+                              item.get("folder", ""), item["id"])
 
-        self._last_order[kind] = order
-        table.setRowCount(0)
-        for item in items:
-            self._add_row(table, item["song"], item.get("artist", ""),
-                          item.get("folder", ""), item["id"])
+        self._apply_current_highlight(table, current_id)
+
+    def _apply_current_highlight(self, table, current_id):
+        """Bold the currently-playing row's song title. Deliberately
+        avoids touching text color, since a hardcoded color can end up
+        invisible against the system's actual light/dark theme -- bold
+        stays readable either way."""
+        for row in range(table.rowCount()):
+            song_item = table.item(row, COL_SONG)
+            if song_item is None:
+                continue
+            track_id = song_item.data(ID_ROLE)
+            font = song_item.font()
+            font.setBold(track_id == current_id)
+            song_item.setFont(font)
 
     def _add_row(self, table, song, artist, folder_name, track_id, row=None):
         if row is None:
