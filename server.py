@@ -328,11 +328,6 @@ class PlayerState:
         media = self.vlc_instance.media_new(path)
         if not want_video:
             media.add_option(":no-video")
-        else:
-            screen = self._target_screen()
-            if screen is not None:
-                media.add_option(f":video-x={screen['x']}")
-                media.add_option(f":video-y={screen['y']}")
         return media
 
     def _safe_set_fullscreen(self, value):
@@ -341,6 +336,58 @@ class PlayerState:
                 self.player.set_fullscreen(bool(value))
             except Exception as e:
                 print(f"[church-player] set_fullscreen failed: {e}")
+
+    def _find_vlc_window_id(self, retries=15, delay=0.15):
+        """Poll for the actual X11 window VLC's video output creates.
+        The window doesn't exist the instant play() returns -- it takes
+        a moment for VLC to open it -- so this retries briefly rather
+        than giving up after one attempt."""
+        for _ in range(retries):
+            try:
+                result = subprocess.run(
+                    ["xdotool", "search", "--class", "vlc"],
+                    capture_output=True, text=True, timeout=2,
+                )
+                ids = [i for i in result.stdout.split() if i]
+                if ids:
+                    return ids[-1]  # most recently matched
+            except FileNotFoundError:
+                print("[church-player] xdotool not installed -- "
+                      "can't reposition the video window. "
+                      "Install it with: sudo apt install xdotool")
+                return None
+            except Exception as e:
+                print(f"[church-player] xdotool search failed: {e}")
+                return None
+            time.sleep(delay)
+        print("[church-player] gave up looking for VLC's video window")
+        return None
+
+    def _apply_video_placement(self):
+        """Move VLC's actual video window onto the target screen, then
+        fullscreen it there. This is the part that makes the display
+        choice actually take effect -- libvlc's own --video-x/-y media
+        options aren't reliably honored by modern video output modules
+        for window placement, so we instead find the real window with
+        xdotool and move it ourselves before requesting fullscreen."""
+        screen = self._target_screen()
+        if screen is not None:
+            win_id = self._find_vlc_window_id()
+            if win_id:
+                try:
+                    subprocess.run(
+                        ["xdotool", "windowmove", win_id, str(screen["x"]), str(screen["y"])],
+                        timeout=2,
+                    )
+                    subprocess.run(
+                        ["xdotool", "windowsize", win_id, str(screen["width"]), str(screen["height"])],
+                        timeout=2,
+                    )
+                    print(f"[church-player] moved VLC window {win_id} to "
+                          f"{screen['name']} ({screen['x']},{screen['y']})")
+                except Exception as e:
+                    print(f"[church-player] failed to move VLC window: {e}")
+        self._safe_set_fullscreen(True)
 
     def play(self, track_id, move_to_top=False, video_enabled=None):
         with self.lock:
@@ -371,7 +418,7 @@ class PlayerState:
             if video_enabled:
                 # Give the video output a moment to actually exist
                 # before asking it to go fullscreen.
-                threading.Timer(0.3, lambda: self._safe_set_fullscreen(True)).start()
+                threading.Timer(0.3, self._apply_video_placement).start()
             # Diagnostic: confirm VLC's own view of state and volume after
             # play() is called. If state prints "Error" or volume prints
             # -1, VLC failed to open the audio device -- check the
@@ -428,7 +475,7 @@ class PlayerState:
             print(f"[church-player] video toggled: now {want}")
 
             if want:
-                threading.Timer(0.3, lambda: self._safe_set_fullscreen(True)).start()
+                threading.Timer(0.3, self._apply_video_placement).start()
             if current_time and current_time > 0:
                 threading.Timer(
                     0.3, lambda: self.player.set_time(current_time)
@@ -459,7 +506,7 @@ class PlayerState:
                     media = self._make_media(item["path"], True)
                     self.player.set_media(media)
                     self.player.play()
-                    threading.Timer(0.3, lambda: self._safe_set_fullscreen(True)).start()
+                    threading.Timer(0.3, self._apply_video_placement).start()
                     if current_time and current_time > 0:
                         threading.Timer(
                             0.3, lambda: self.player.set_time(current_time)
