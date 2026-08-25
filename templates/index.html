@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Church Media Player</title>
+<link rel="icon" type="image/x-icon" href="/static/icons/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/static/icons/icon-32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/static/icons/icon-16.png">
+<link rel="apple-touch-icon" href="/static/icons/icon-192.png">
+<link rel="manifest" href="/static/manifest.json">
+<meta name="theme-color" content="#5b8def">
+<style>
+  :root {
+    --bg: #1c1e24;
+    --panel: #262933;
+    --row: #2d313c;
+    --row-alt: #2a2d37;
+    --accent: #5b8def;
+    --text: #e8eaed;
+    --muted: #9aa0ac;
+    --border: #3a3f4b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    padding: 16px 20px 8px;
+  }
+  header h1 {
+    font-size: 1.3rem;
+    margin: 0 0 4px;
+  }
+  #status-line {
+    color: var(--muted);
+    font-size: 0.85rem;
+  }
+  main {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 8px 16px 32px;
+  }
+  #now-playing {
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin: 8px 0 14px;
+  }
+  #now-playing .title {
+    font-weight: 600;
+    font-size: 1.05rem;
+    margin-bottom: 8px;
+  }
+  .progress-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .time-label {
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    font-size: 0.85rem;
+    width: 44px;
+  }
+  .time-label.remaining { text-align: right; }
+  input[type="range"] {
+    flex: 1;
+    accent-color: var(--accent);
+  }
+  .video-controls {
+    display: none;
+    gap: 10px;
+    margin-top: 12px;
+    align-items: center;
+  }
+  .video-controls.visible { display: flex; }
+  .toggle-btn {
+    background: var(--row);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 7px 14px;
+    border-radius: 20px;
+    font-size: 0.85rem;
+    cursor: pointer;
+  }
+  .toggle-btn.active {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: white;
+  }
+  .toggle-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .controls {
+    display: flex;
+    justify-content: center;
+    gap: 14px;
+    margin: 14px 0 18px;
+  }
+  .icon-btn {
+    background: var(--accent);
+    border: none;
+    color: white;
+    width: 56px;
+    height: 56px;
+    border-radius: 50%;
+    font-size: 1.4rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+  }
+  .icon-btn:active { transform: scale(0.95); }
+  .volume-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 18px;
+    color: var(--muted);
+    font-size: 0.9rem;
+  }
+  .tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 10px;
+  }
+  .tab-btn {
+    flex: 1;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 0.95rem;
+    cursor: pointer;
+  }
+  .tab-btn.active {
+    background: var(--accent);
+    color: white;
+    border-color: var(--accent);
+  }
+  .playlist {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    display: none;
+  }
+  .playlist.active { display: block; }
+  .playlist li {
+    display: flex;
+    align-items: center;
+    background: var(--row);
+    padding: 10px 10px;
+    border-bottom: 1px solid var(--border);
+    touch-action: pan-y;
+  }
+  .playlist li:nth-child(even) { background: var(--row-alt); }
+  .playlist li:last-child { border-bottom: none; }
+  .playlist li.current { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .playlist li.selected { background: #33384a; }
+  .playlist li.dragging { opacity: 0.5; }
+  .drag-handle {
+    color: var(--muted);
+    padding: 4px 10px 4px 2px;
+    cursor: grab;
+    touch-action: none;
+    font-size: 1.1rem;
+    user-select: none;
+  }
+  .row-text {
+    flex: 1;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+  }
+  .song-name {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .artist-name {
+    color: var(--muted);
+    font-size: 0.85rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+  .folder-badge {
+    color: var(--muted);
+    font-size: 0.75rem;
+    white-space: nowrap;
+    flex-shrink: 0;
+    background: var(--row-alt);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1px 8px;
+  }
+  .empty-message {
+    display: none;
+    color: var(--muted);
+    padding: 20px;
+    text-align: center;
+  }
+  .empty-message.visible { display: block; }
+  #settings-panel {
+    margin-top: 22px;
+    background: var(--panel);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+  #settings-panel h2 {
+    font-size: 0.95rem;
+    margin: 0 0 10px;
+    color: var(--muted);
+    font-weight: 600;
+  }
+  .settings-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .settings-row label {
+    display: block;
+    font-size: 0.8rem;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  #settings-panel input[type="text"] {
+    flex: 1;
+    background: var(--row);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+  }
+  #settings-panel select {
+    flex: 1;
+    background: var(--row);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 10px;
+    border-radius: 6px;
+  }
+  #settings-panel button {
+    background: var(--row);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .settings-error {
+    color: #f28b82;
+    font-size: 0.85rem;
+    margin-top: 4px;
+    margin-bottom: 8px;
+  }
+  #refresh-btn {
+    background: var(--row);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>🎵 Church Media Player</h1>
+  <div id="status-line">Connecting...</div>
+</header>
+
+<main>
+  <div id="now-playing">
+    <div class="title" id="now-playing-title">Nothing playing</div>
+    <div class="progress-row">
+      <span class="time-label" id="elapsed-label">00:00</span>
+      <input type="range" id="seek-slider" min="0" max="1000" value="0">
+      <span class="time-label remaining" id="remaining-label">-00:00</span>
+    </div>
+    <div class="video-controls" id="video-controls">
+      <button class="toggle-btn" id="video-toggle-btn">Show video</button>
+      <button class="toggle-btn" id="fullscreen-toggle-btn">Fullscreen</button>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button class="icon-btn" id="play-btn" title="Play">&#9658;</button>
+    <button class="icon-btn" id="pause-btn" title="Pause">&#10074;&#10074;</button>
+    <button class="icon-btn" id="stop-btn" title="Stop">&#9632;</button>
+  </div>
+
+  <div class="volume-row">
+    <span>Volume</span>
+    <input type="range" id="volume-slider" min="0" max="100" value="80">
+  </div>
+
+  <div class="tabs">
+    <button class="tab-btn active" data-list="music">Music</button>
+    <button class="tab-btn" data-list="video">Videos</button>
+  </div>
+
+  <ul class="playlist active" id="playlist-music" data-list="music"></ul>
+  <ul class="playlist" id="playlist-video" data-list="video"></ul>
+  <div class="empty-message" id="empty-music">No music files found. Set the Music folder below.</div>
+  <div class="empty-message" id="empty-video">No video files found. Set the Video folder below.</div>
+
+  <div id="settings-panel">
+    <h2>Music folder (on the server machine)</h2>
+    <div class="settings-row">
+      <input type="text" id="folder-input-music" placeholder="/home/username/Music">
+      <button data-list="music" class="save-folder-btn">Save</button>
+    </div>
+    <div class="settings-error" id="settings-error-music"></div>
+
+    <h2>Video folder (on the server machine)</h2>
+    <div class="settings-row">
+      <input type="text" id="folder-input-video" placeholder="/home/username/Videos">
+      <button data-list="video" class="save-folder-btn">Save</button>
+    </div>
+    <div class="settings-error" id="settings-error-video"></div>
+
+    <h2>Video display</h2>
+    <div class="settings-row">
+      <select id="video-screen-select"></select>
+    </div>
+
+    <button id="refresh-btn">Refresh both</button>
+  </div>
+</main>
+
+<script>
+const statusLine = document.getElementById('status-line');
+const nowPlayingTitle = document.getElementById('now-playing-title');
+const elapsedLabel = document.getElementById('elapsed-label');
+const remainingLabel = document.getElementById('remaining-label');
+const seekSlider = document.getElementById('seek-slider');
+const volumeSlider = document.getElementById('volume-slider');
+const videoControls = document.getElementById('video-controls');
+const videoToggleBtn = document.getElementById('video-toggle-btn');
+const fullscreenToggleBtn = document.getElementById('fullscreen-toggle-btn');
+
+const playlistEls = {
+  music: document.getElementById('playlist-music'),
+  video: document.getElementById('playlist-video'),
+};
+const emptyEls = {
+  music: document.getElementById('empty-music'),
+  video: document.getElementById('empty-video'),
+};
+const folderInputs = {
+  music: document.getElementById('folder-input-music'),
+  video: document.getElementById('folder-input-video'),
+};
+const settingsErrorEls = {
+  music: document.getElementById('settings-error-music'),
+  video: document.getElementById('settings-error-video'),
+};
+
+let activeTab = 'music';
+let selectedIds = { music: null, video: null };
+let seekDragging = false;
+let volumeDragging = false;
+let draggingRow = null;
+let draggingList = null;
+let lastRenderedOrder = { music: null, video: null };
+
+function formatTime(ms) {
+  if (!ms || ms < 0) ms = 0;
+  const totalSeconds = Math.floor(ms / 1000);
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0');
+}
+
+async function apiPost(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  return res.json();
+}
+
+async function fetchState() {
+  try {
+    const res = await fetch('/api/state');
+    const data = await res.json();
+    render(data);
+    statusLine.textContent = 'Connected';
+  } catch (e) {
+    statusLine.textContent = 'Disconnected from server — retrying...';
+  }
+}
+
+function render(data) {
+  // Now playing label
+  if (data.current_song) {
+    nowPlayingTitle.textContent = data.current_artist
+      ? `${data.current_song} — ${data.current_artist}`
+      : data.current_song;
+  } else {
+    nowPlayingTitle.textContent = 'Nothing playing';
+  }
+
+  // Progress
+  if (!seekDragging) {
+    const fraction = data.length_ms > 0 ? data.elapsed_ms / data.length_ms : 0;
+    seekSlider.value = Math.round(fraction * 1000);
+  }
+  elapsedLabel.textContent = formatTime(data.elapsed_ms);
+  remainingLabel.textContent = '-' + formatTime(Math.max(0, data.length_ms - data.elapsed_ms));
+
+  if (!volumeDragging) {
+    volumeSlider.value = data.volume;
+  }
+
+  // Video / fullscreen controls -- only shown when the current track is a video file
+  if (data.current_is_video) {
+    videoControls.classList.add('visible');
+    videoToggleBtn.classList.toggle('active', data.video_enabled);
+    videoToggleBtn.textContent = data.video_enabled ? 'Video: On' : 'Video: Off';
+    fullscreenToggleBtn.disabled = !data.video_enabled;
+    fullscreenToggleBtn.classList.toggle('active', data.fullscreen);
+    fullscreenToggleBtn.textContent = data.fullscreen ? 'Exit Fullscreen' : 'Fullscreen';
+  } else {
+    videoControls.classList.remove('visible');
+  }
+
+  for (const kind of ['music', 'video']) {
+    if (document.activeElement !== folderInputs[kind]) {
+      folderInputs[kind].value = (data.folders && data.folders[kind]) || '';
+    }
+    const items = (data.playlists && data.playlists[kind]) || [];
+    renderPlaylist(kind, items, data.current_id);
+    emptyEls[kind].classList.toggle('visible', items.length === 0);
+  }
+}
+
+function renderPlaylist(kind, items, currentId) {
+  const playlistEl = playlistEls[kind];
+  const order = items.map(i => i.id).join(',');
+  if (draggingRow && draggingList === kind) return; // don't touch the DOM mid-drag
+
+  if (order === lastRenderedOrder[kind]) {
+    [...playlistEl.children].forEach(li => {
+      const id = parseInt(li.dataset.id, 10);
+      li.classList.toggle('current', id === currentId);
+      li.classList.toggle('selected', id === selectedIds[kind]);
+    });
+    return;
+  }
+
+  lastRenderedOrder[kind] = order;
+  playlistEl.innerHTML = '';
+  items.forEach(item => {
+    const li = document.createElement('li');
+    li.dataset.id = item.id;
+    if (item.id === currentId) li.classList.add('current');
+    if (item.id === selectedIds[kind]) li.classList.add('selected');
+
+    const handle = document.createElement('span');
+    handle.className = 'drag-handle';
+    handle.textContent = '\u2630';
+    handle.addEventListener('pointerdown', (e) => onDragStart(e, kind));
+
+    const textWrap = document.createElement('span');
+    textWrap.className = 'row-text';
+
+    const songSpan = document.createElement('span');
+    songSpan.className = 'song-name';
+    songSpan.textContent = item.song;
+
+    const artistSpan = document.createElement('span');
+    artistSpan.className = 'artist-name';
+    artistSpan.textContent = item.artist || '';
+
+    textWrap.appendChild(songSpan);
+    if (item.folder) {
+      const folderSpan = document.createElement('span');
+      folderSpan.className = 'folder-badge';
+      folderSpan.textContent = item.folder;
+      textWrap.appendChild(folderSpan);
+    }
+    textWrap.appendChild(artistSpan);
+
+    li.appendChild(handle);
+    li.appendChild(textWrap);
+
+    li.addEventListener('click', () => {
+      selectedIds[kind] = item.id;
+      [...playlistEl.children].forEach(c => c.classList.remove('selected'));
+      li.classList.add('selected');
+    });
+    li.addEventListener('dblclick', () => {
+      selectedIds[kind] = item.id;
+      apiPost('/api/play', { id: item.id, move_to_top: true }).then(fetchState);
+    });
+
+    playlistEl.appendChild(li);
+  });
+}
+
+// ---- Tabs ----
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    activeTab = btn.dataset.list;
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.playlist').forEach(p => p.classList.toggle('active', p.dataset.list === activeTab));
+  });
+});
+
+// ---- Drag to reorder (pointer events: works for mouse + touch) ----
+function onDragStart(e, kind) {
+  const li = e.target.closest('li');
+  if (!li) return;
+  draggingRow = li;
+  draggingList = kind;
+  li.classList.add('dragging');
+  e.target.setPointerCapture(e.pointerId);
+  document.addEventListener('pointermove', onDragMove);
+  document.addEventListener('pointerup', onDragEnd, { once: true });
+}
+
+function onDragMove(e) {
+  if (!draggingRow) return;
+  const playlistEl = playlistEls[draggingList];
+  const rows = [...playlistEl.children].filter(r => r !== draggingRow);
+  const y = e.clientY;
+
+  let target = null;
+  for (const row of rows) {
+    const rect = row.getBoundingClientRect();
+    const midpoint = rect.top + rect.height / 2;
+    if (y < midpoint) { target = row; break; }
+  }
+
+  if (target) {
+    playlistEl.insertBefore(draggingRow, target);
+  } else {
+    playlistEl.appendChild(draggingRow);
+  }
+}
+
+function onDragEnd() {
+  document.removeEventListener('pointermove', onDragMove);
+  if (draggingRow) {
+    const kind = draggingList;
+    draggingRow.classList.remove('dragging');
+    const order = [...playlistEls[kind].children].map(li => parseInt(li.dataset.id, 10));
+    lastRenderedOrder[kind] = order.join(',');
+    draggingRow = null;
+    draggingList = null;
+    apiPost('/api/reorder', { list: kind, order }).then(fetchState);
+  }
+}
+
+// ---- Transport controls (act on whichever tab is active) ----
+document.getElementById('play-btn').addEventListener('click', () => {
+  const playlistEl = playlistEls[activeTab];
+  const id = selectedIds[activeTab] ??
+    (playlistEl.firstElementChild ? parseInt(playlistEl.firstElementChild.dataset.id, 10) : null);
+  if (id == null) return;
+  apiPost('/api/play', { id }).then(fetchState);
+});
+document.getElementById('pause-btn').addEventListener('click', () => {
+  apiPost('/api/pause').then(fetchState);
+});
+document.getElementById('stop-btn').addEventListener('click', () => {
+  apiPost('/api/stop').then(fetchState);
+});
+
+// ---- Video / fullscreen toggles ----
+videoToggleBtn.addEventListener('click', () => {
+  const wantOn = !videoToggleBtn.classList.contains('active');
+  apiPost('/api/video', { value: wantOn }).then(fetchState);
+});
+fullscreenToggleBtn.addEventListener('click', () => {
+  if (fullscreenToggleBtn.disabled) return;
+  const wantOn = !fullscreenToggleBtn.classList.contains('active');
+  apiPost('/api/fullscreen', { value: wantOn }).then(fetchState);
+});
+
+// ---- Seek slider ----
+seekSlider.addEventListener('pointerdown', () => { seekDragging = true; });
+seekSlider.addEventListener('change', () => {
+  const fraction = seekSlider.value / 1000;
+  apiPost('/api/seek', { fraction }).then(() => { seekDragging = false; fetchState(); });
+});
+
+// ---- Volume slider ----
+volumeSlider.addEventListener('pointerdown', () => { volumeDragging = true; });
+volumeSlider.addEventListener('input', () => {
+  apiPost('/api/volume', { value: parseInt(volumeSlider.value, 10) });
+});
+volumeSlider.addEventListener('change', () => { volumeDragging = false; });
+
+// ---- Settings ----
+document.querySelectorAll('.save-folder-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const kind = btn.dataset.list;
+    settingsErrorEls[kind].textContent = '';
+    const result = await apiPost('/api/settings', { list: kind, folder: folderInputs[kind].value.trim() });
+    if (result.error) {
+      settingsErrorEls[kind].textContent = result.error;
+    } else {
+      render(result);
+    }
+  });
+});
+document.getElementById('refresh-btn').addEventListener('click', () => {
+  apiPost('/api/refresh', {}).then(render);
+});
+
+// ---- Video display picker ----
+const videoScreenSelect = document.getElementById('video-screen-select');
+let screensLoaded = false;
+
+async function loadScreens() {
+  try {
+    const res = await fetch('/api/screens');
+    const data = await res.json();
+    videoScreenSelect.innerHTML = '';
+
+    const autoOption = document.createElement('option');
+    autoOption.value = '';
+    autoOption.textContent = 'Auto (prefer the non-primary display)';
+    videoScreenSelect.appendChild(autoOption);
+
+    (data.screens || []).forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.index;
+      opt.textContent = `${s.index}: ${s.name} (${s.width}x${s.height} at ${s.x},${s.y})`;
+      videoScreenSelect.appendChild(opt);
+    });
+
+    videoScreenSelect.value = data.selected_index === null || data.selected_index === undefined
+      ? '' : String(data.selected_index);
+    screensLoaded = true;
+  } catch (e) {
+    // Settings panel just won't have display options if this fails; not critical.
+  }
+}
+
+videoScreenSelect.addEventListener('change', () => {
+  const value = videoScreenSelect.value;
+  apiPost('/api/video_screen', { index: value === '' ? null : parseInt(value, 10) });
+});
+
+loadScreens();
+
+fetchState();
+setInterval(fetchState, 700);
+</script>
+</body>
+
+</html>
