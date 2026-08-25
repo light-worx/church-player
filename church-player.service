@@ -1,0 +1,13 @@
+[Unit]
+Description=Church Media Player Web Server
+After=default.target sound.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/wmc/church-player
+ExecStart=/usr/bin/python3 -u /home/wmc/church-player/server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
