@@ -328,14 +328,83 @@ class PlayerState:
         media = self.vlc_instance.media_new(path)
         if not want_video:
             media.add_option(":no-video")
+        else:
+            # Force software decoding. Hardware-accelerated decode/output
+            # has shown real instability on some machines (failed VA-API
+            # drivers, decode errors, and in the worst case a hung X
+            # connection) -- software decoding is slower but far more
+            # reliable for something that has to run unattended.
+            media.add_option(":avcodec-hw=none")
         return media
 
-    def _safe_set_fullscreen(self, value):
-        with self.lock:
+    # ------------------------------------------------------------------
+    # Safe wrappers around direct libvlc calls
+    #
+    # None of these ever run while self.lock is held, and the riskiest
+    # ones (play/stop/fullscreen -- the calls that actually talk to the
+    # X server) go through _call_with_timeout so that even a genuinely
+    # hung call can't block the request that triggered it forever. This
+    # matters because things outside our control can put VLC's video
+    # output into a bad state -- e.g. force-closing its window with
+    # Alt+F4, or a flaky graphics driver -- and when that happens we'd
+    # rather have one action fail/time out than freeze the whole server
+    # for every connected device.
+    # ------------------------------------------------------------------
+    def _call_with_timeout(self, func, timeout=3.0, name="vlc call"):
+        result = {}
+
+        def runner():
             try:
-                self.player.set_fullscreen(bool(value))
+                result["value"] = func()
             except Exception as e:
-                print(f"[church-player] set_fullscreen failed: {e}")
+                result["error"] = e
+
+        t = threading.Thread(target=runner, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            print(f"[church-player] {name} did not return within {timeout}s -- "
+                  f"giving up waiting on it (it may finish in the background, "
+                  f"but we're not blocking on it any further)")
+            return None
+        if "error" in result:
+            print(f"[church-player] {name} raised: {result['error']}")
+            return None
+        return result.get("value")
+
+    def _safe_play(self):
+        self._call_with_timeout(self.player.play, name="player.play()")
+
+    def _safe_stop(self):
+        self._call_with_timeout(self.player.stop, name="player.stop()")
+
+    def _safe_set_fullscreen(self, value):
+        self._call_with_timeout(
+            lambda: self.player.set_fullscreen(bool(value)),
+            name="player.set_fullscreen()",
+        )
+
+    def _safe_set_media(self, media):
+        self._call_with_timeout(lambda: self.player.set_media(media), name="player.set_media()")
+
+    def _safe_audio_set_volume(self, value):
+        try:
+            self.player.audio_set_volume(value)
+        except Exception as e:
+            print(f"[church-player] audio_set_volume failed: {e}")
+
+    def _safe_get_time(self):
+        try:
+            return self.player.get_time()
+        except Exception as e:
+            print(f"[church-player] get_time failed: {e}")
+            return None
+
+    def _safe_set_time(self, value):
+        try:
+            self.player.set_time(value)
+        except Exception as e:
+            print(f"[church-player] set_time failed: {e}")
 
     def _find_vlc_window_id(self, retries=15, delay=0.15):
         """Poll for the actual X11 window VLC's video output creates.
@@ -389,10 +458,20 @@ class PlayerState:
                     print(f"[church-player] failed to move VLC window: {e}")
         self._safe_set_fullscreen(True)
 
-    def play(self, track_id, move_to_top=False, video_enabled=None):
-        with self.lock:
-            self.cancel_fade()
+    def _reassert_volume_soon(self):
+        """Push the desired volume again a moment after playback starts.
+        Some audio servers (PulseAudio/PipeWire's stream-restore
+        behavior) automatically apply a remembered volume to a brand
+        new audio stream the instant it's created -- which can silently
+        override whatever we set beforehand, especially right after a
+        fade-out left the last stream at (or near) zero. Re-asserting
+        once the new stream actually exists makes sure our value wins."""
+        threading.Timer(0.3, lambda: self._safe_audio_set_volume(self.desired_volume)).start()
 
+    def play(self, track_id, move_to_top=False, video_enabled=None):
+        self.cancel_fade()
+
+        with self.lock:
             found = self._find_track(track_id)
             if found is None:
                 return False
@@ -407,46 +486,55 @@ class PlayerState:
             if video_enabled is None:
                 video_enabled = (kind == "video")
             video_enabled = bool(video_enabled) and is_video_file(item["path"])
+            path = item["path"]
+            song = item["song"]
 
-            media = self._make_media(item["path"], video_enabled)
-            self.player.set_media(media)
-            self.player.audio_set_volume(self.desired_volume)
-            self.player.play()
+        # The actual VLC calls happen outside the lock, so a hang here
+        # (e.g. a broken video output) can't block other clients.
+        media = self._make_media(path, video_enabled)
+        self._safe_set_media(media)
+        self._safe_audio_set_volume(self.desired_volume)
+        self._safe_play()
+        self._reassert_volume_soon()
+
+        with self.lock:
             self.current_id = track_id
             self.current_list = kind
             self.video_enabled = video_enabled
-            if video_enabled:
-                # Give the video output a moment to actually exist
-                # before asking it to go fullscreen.
-                threading.Timer(0.3, self._apply_video_placement).start()
-            # Diagnostic: confirm VLC's own view of state and volume after
-            # play() is called. If state prints "Error" or volume prints
-            # -1, VLC failed to open the audio device -- check the
-            # terminal for accompanying error text above this line.
-            print(f"[church-player] play requested: {item['song']!r} "
-                  f"list={kind} video={video_enabled} "
-                  f"path={item['path']!r} state={self.player.get_state()} "
-                  f"volume={self.player.audio_get_volume()}")
-            return True
+
+        if video_enabled:
+            # Give the video output a moment to actually exist before
+            # asking it to go fullscreen.
+            threading.Timer(0.3, self._apply_video_placement).start()
+
+        print(f"[church-player] play requested: {song!r} "
+              f"list={kind} video={video_enabled} path={path!r}")
+        return True
 
     def toggle_pause(self):
-        with self.lock:
-            self.cancel_fade()
+        self.cancel_fade()
+        try:
             self.player.pause()
+        except Exception as e:
+            print(f"[church-player] pause failed: {e}")
 
     def set_volume(self, value):
+        value = max(0, min(100, int(value)))
         with self.lock:
-            value = max(0, min(100, int(value)))
             self.desired_volume = value
-            if not self.fading:
-                self.player.audio_set_volume(value)
+            fading = self.fading
+        if not fading:
+            self._safe_audio_set_volume(value)
 
     def seek(self, fraction):
-        with self.lock:
+        try:
             length = self.player.get_length()
-            if length and length > 0:
-                fraction = max(0.0, min(1.0, fraction))
-                self.player.set_time(int(fraction * length))
+        except Exception as e:
+            print(f"[church-player] get_length failed: {e}")
+            return
+        if length and length > 0:
+            fraction = max(0.0, min(1.0, fraction))
+            self._safe_set_time(int(fraction * length))
 
     def set_video_enabled(self, value):
         """Toggle video on/off for whatever's currently playing. Only
@@ -461,25 +549,27 @@ class PlayerState:
             _, _, item = found
             if not is_video_file(item["path"]):
                 return
-
             want = bool(value)
             if want == self.video_enabled:
                 return
+            path = item["path"]
 
-            current_time = self.player.get_time()
-            self.player.stop()
-            media = self._make_media(item["path"], want)
-            self.player.set_media(media)
+        current_time = self._safe_get_time()
+        self._safe_stop()
+        media = self._make_media(path, want)
+        self._safe_set_media(media)
+        self._safe_audio_set_volume(self.desired_volume)
+        self._safe_play()
+        self._reassert_volume_soon()
+
+        with self.lock:
             self.video_enabled = want
-            self.player.play()
-            print(f"[church-player] video toggled: now {want}")
 
-            if want:
-                threading.Timer(0.3, self._apply_video_placement).start()
-            if current_time and current_time > 0:
-                threading.Timer(
-                    0.3, lambda: self.player.set_time(current_time)
-                ).start()
+        print(f"[church-player] video toggled: now {want}")
+        if want:
+            threading.Timer(0.3, self._apply_video_placement).start()
+        if current_time and current_time > 0:
+            threading.Timer(0.3, lambda: self._safe_set_time(current_time)).start()
 
     def set_fullscreen(self, value):
         self._safe_set_fullscreen(value)
@@ -496,26 +586,32 @@ class PlayerState:
             self.video_screen_index = index
             self.config["video_screen_index"] = index
             save_config(self.config)
-
-            if self.current_id is not None and self.video_enabled:
+            reposition = self.current_id is not None and self.video_enabled
+            path = None
+            if reposition:
                 found = self._find_track(self.current_id)
                 if found is not None:
-                    _, _, item = found
-                    current_time = self.player.get_time()
-                    self.player.stop()
-                    media = self._make_media(item["path"], True)
-                    self.player.set_media(media)
-                    self.player.play()
-                    threading.Timer(0.3, self._apply_video_placement).start()
-                    if current_time and current_time > 0:
-                        threading.Timer(
-                            0.3, lambda: self.player.set_time(current_time)
-                        ).start()
+                    path = found[2]["path"]
+                else:
+                    reposition = False
+
+        if reposition and path:
+            current_time = self._safe_get_time()
+            self._safe_stop()
+            media = self._make_media(path, True)
+            self._safe_set_media(media)
+            self._safe_audio_set_volume(self.desired_volume)
+            self._safe_play()
+            self._reassert_volume_soon()
+            threading.Timer(0.3, self._apply_video_placement).start()
+            if current_time and current_time > 0:
+                threading.Timer(0.3, lambda: self._safe_set_time(current_time)).start()
 
     def play_next(self):
         """Advance to the next track in the current library's order, if
         there is one. Called when a track finishes naturally."""
         print("[church-player] play_next() invoked")
+        next_id = None
         with self.lock:
             if self.current_id is None or self.current_list is None:
                 print("[church-player] play_next: nothing currently playing")
@@ -533,12 +629,15 @@ class PlayerState:
             print(f"[church-player] play_next: list={self.current_list} "
                   f"idx={idx}, next_idx={next_idx}, len={len(playlist)}")
             if next_idx < len(playlist):
-                self.play(playlist[next_idx]["id"])
+                next_id = playlist[next_idx]["id"]
             else:
                 print("[church-player] play_next: reached end of playlist")
                 self.current_id = None
                 self.current_list = None
                 self.video_enabled = False
+
+        if next_id is not None:
+            self.play(next_id)  # outside the lock -- play() takes its own
 
     def _on_end_reached(self, event):
         # Runs on VLC's internal event thread. We deliberately wait a
@@ -557,21 +656,34 @@ class PlayerState:
         with self.lock:
             if self.fading:
                 return  # already fading out, let it finish
+        try:
             state = self.player.get_state()
-            if state in (vlc.State.Playing, vlc.State.Paused):
-                self._start_fade_out()
-            else:
-                self.player.stop()
+        except Exception as e:
+            print(f"[church-player] get_state failed: {e}")
+            state = None
+
+        if state in (vlc.State.Playing, vlc.State.Paused):
+            self._start_fade_out()
+        else:
+            self._safe_stop()
+            with self.lock:
                 self.current_id = None
                 self.current_list = None
                 self.video_enabled = False
 
     def _start_fade_out(self):
-        current_volume = self.player.audio_get_volume()
+        try:
+            current_volume = self.player.audio_get_volume()
+        except Exception as e:
+            print(f"[church-player] audio_get_volume failed: {e}")
+            current_volume = None
+
         if current_volume is None or current_volume <= 0:
             self._finish_stop()
             return
-        self.fading = True
+
+        with self.lock:
+            self.fading = True
         threading.Thread(
             target=self._fade_worker, args=(current_volume,), daemon=True
         ).start()
@@ -584,26 +696,31 @@ class PlayerState:
                 if not self.fading:
                     return  # cancelled
                 elapsed = time.monotonic() - start_time
-                if elapsed >= FADE_OUT_SECONDS:
-                    self._finish_stop()
-                    return
-                fraction_remaining = 1.0 - (elapsed / FADE_OUT_SECONDS)
-                new_volume = int(round(start_volume * fraction_remaining))
-                self.player.audio_set_volume(max(0, new_volume))
+                done = elapsed >= FADE_OUT_SECONDS
+                if not done:
+                    fraction_remaining = 1.0 - (elapsed / FADE_OUT_SECONDS)
+                    new_volume = max(0, int(round(start_volume * fraction_remaining)))
+            if done:
+                self._finish_stop()
+                return
+            self._safe_audio_set_volume(new_volume)
 
     def _finish_stop(self):
-        self.fading = False
-        self.player.stop()
-        self.player.audio_set_volume(self.desired_volume)
-        self.current_id = None
-        self.current_list = None
-        self.video_enabled = False
+        with self.lock:
+            self.fading = False
+        self._safe_stop()
+        self._safe_audio_set_volume(self.desired_volume)
+        with self.lock:
+            self.current_id = None
+            self.current_list = None
+            self.video_enabled = False
 
     def cancel_fade(self):
         with self.lock:
-            if self.fading:
-                self.fading = False
-                self.player.audio_set_volume(self.desired_volume)
+            if not self.fading:
+                return
+            self.fading = False
+        self._safe_audio_set_volume(self.desired_volume)
 
     def restore_volume_now(self):
         """Unconditionally push the volume back to its normal level,
@@ -614,36 +731,48 @@ class PlayerState:
         system volume, so this matters beyond just this app."""
         with self.lock:
             self.fading = False
-            try:
-                self.player.audio_set_volume(self.desired_volume)
-            except Exception:
-                pass
+        self._safe_audio_set_volume(self.desired_volume)
 
     # ------------------------------------------------------------------
     # Status snapshot for the frontend
     # ------------------------------------------------------------------
     def snapshot(self):
-        with self.lock:
-            state = self.player.get_state()
-            is_playing = state == vlc.State.Playing
-            is_paused = state == vlc.State.Paused
+        # Query the player itself OUTSIDE the shared lock. These calls
+        # can in principle hang if the underlying graphics driver/X
+        # connection wedges (see the note on _safe_set_fullscreen) --
+        # if that ever happens, it should only affect the one request
+        # doing the querying, not freeze the shared lock that every
+        # other API call (from every other client) also needs.
+        try:
+            vlc_state = self.player.get_state()
+        except Exception:
+            vlc_state = None
+        try:
             length = self.player.get_length()
+        except Exception:
+            length = 0
+        try:
             current = self.player.get_time()
-            if length is None or length < 0:
-                length = 0
-            if current is None or current < 0:
-                current = 0
+        except Exception:
+            current = 0
+        try:
+            fullscreen = bool(self.player.get_fullscreen())
+        except Exception:
+            fullscreen = False
 
+        is_playing = vlc_state == vlc.State.Playing
+        is_paused = vlc_state == vlc.State.Paused
+        if length is None or length < 0:
+            length = 0
+        if current is None or current < 0:
+            current = 0
+
+        with self.lock:
             current_item = None
             if self.current_id is not None:
                 found = self._find_track(self.current_id)
                 if found is not None:
                     current_item = found[2]
-
-            try:
-                fullscreen = bool(self.player.get_fullscreen())
-            except Exception:
-                fullscreen = False
 
             return {
                 "playlists": {

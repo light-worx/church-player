@@ -45,11 +45,13 @@ device on the same network** — laptop, tablet, or phone.
 
 ## Setup (one-time)
 
-1. Install VLC on the church PC:
+1. Install VLC and xdotool on the church PC (xdotool is used to move
+   VLC's video window onto the correct display -- see "Video
+   playback" below):
 
    ```bash
    sudo apt update
-   sudo apt install vlc
+   sudo apt install vlc xdotool
    ```
 
 2. Install the Python packages:
@@ -123,14 +125,28 @@ screen when you'd expect it to:
 `xrandr` and defaults to whichever one *isn't* the primary display
 (since the projector is normally the extended/secondary one). If it
 guesses wrong, use **Video > Choose Video Display...** in the desktop
-app, which lists the detected displays so you can pick the right one —
-this is remembered for next time. (If `xrandr` isn't available, e.g.
-on a Wayland session, this auto-positioning is skipped and video just
-opens wherever VLC opens it by default.)
+app (or the equivalent dropdown in the web page's settings panel),
+which lists the detected displays so you can pick the right one — this
+is remembered for next time. Moving the actual VLC window onto that
+display requires `xdotool` (installed above) — if it's missing, video
+still plays and still goes fullscreen, just potentially on the wrong
+screen, and a note appears in the server logs saying so.
 
 Use the **Fullscreen** button (web page or desktop app) any time you
 need to temporarily step out of fullscreen — no need to walk over to
 the PC.
+
+**Important: don't close the video window with Alt+F4 (or Ctrl+F4).**
+That's a window-manager-level shortcut that force-closes whatever
+window has focus, bypassing the app entirely — since the video window
+belongs to VLC itself, forcibly killing it that way can leave VLC in a
+broken state (we've seen this cause an "X server failure" that
+destabilized the video output). Always use the **Show video**
+checkbox/toggle instead to turn video off — that does a controlled
+shutdown rather than a forced window kill. The server is now written
+to survive a stuck/hung video call without freezing the rest of the
+app for other devices, but a truly broken video output may still need
+a `systemctl --user restart church-player` to fully recover.
 
 ## The desktop app
 
