@@ -717,11 +717,40 @@ class PlayerState:
                 return
             self._safe_audio_set_volume(new_volume)
 
+    def _reset_system_output_volume(self):
+        """Directly reset the OS-level default audio sink via pactl, as
+        a mechanism-agnostic safety net alongside our own libvlc volume
+        calls.
+
+        This exists because fading THIS app's stream volume down can,
+        on some systems, bleed through into the shared system output
+        level (flat-volumes / stream-restore-style behavior) -- and
+        once that's happened, calling libvlc's own audio_set_volume()
+        afterward isn't reliably enough to fix it, since there may be
+        no live stream left for that call to act on (e.g. right after
+        stop(), or at process exit). Directly resetting the shared sink
+        sidesteps whatever the exact underlying cause is, and matters
+        beyond just this app -- a stuck-low sink affects everything
+        that plays audio on the machine, not just this player. Uses
+        pactl since that works against both real PulseAudio and
+        PipeWire's PulseAudio-compatible layer.
+        """
+        try:
+            subprocess.run(
+                ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{self.desired_volume}%"],
+                capture_output=True, timeout=2,
+            )
+        except FileNotFoundError:
+            pass  # pactl not installed -- nothing more we can safely do here
+        except Exception as e:
+            print(f"[church-player] pactl sink volume reset failed: {e}")
+
     def _finish_stop(self):
         with self.lock:
             self.fading = False
         self._safe_stop()
         self._safe_audio_set_volume(self.desired_volume)
+        self._reset_system_output_volume()
         with self.lock:
             self.current_id = None
             self.current_list = None
@@ -733,6 +762,7 @@ class PlayerState:
                 return
             self.fading = False
         self._safe_audio_set_volume(self.desired_volume)
+        self._reset_system_output_volume()
 
     def restore_volume_now(self):
         """Unconditionally push the volume back to its normal level,
@@ -744,6 +774,7 @@ class PlayerState:
         with self.lock:
             self.fading = False
         self._safe_audio_set_volume(self.desired_volume)
+        self._reset_system_output_volume()
 
     # ------------------------------------------------------------------
     # Status snapshot for the frontend

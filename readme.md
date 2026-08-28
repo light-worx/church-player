@@ -47,11 +47,14 @@ device on the same network** — laptop, tablet, or phone.
 
 1. Install VLC and xdotool on the church PC (xdotool is used to move
    VLC's video window onto the correct display -- see "Video
-   playback" below):
+   playback" below). `pactl` is also used, as a safety net to make
+   sure the system volume never gets left low -- it's normally already
+   installed as part of PulseAudio/PipeWire, but the package below
+   makes sure:
 
    ```bash
    sudo apt update
-   sudo apt install vlc xdotool
+   sudo apt install vlc xdotool pulseaudio-utils
    ```
 
 2. Install the Python packages:
