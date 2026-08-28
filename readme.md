@@ -126,11 +126,17 @@ screen when you'd expect it to:
 (since the projector is normally the extended/secondary one). If it
 guesses wrong, use **Video > Choose Video Display...** in the desktop
 app (or the equivalent dropdown in the web page's settings panel),
-which lists the detected displays so you can pick the right one — this
-is remembered for next time. Moving the actual VLC window onto that
-display requires `xdotool` (installed above) — if it's missing, video
-still plays and still goes fullscreen, just potentially on the wrong
-screen, and a note appears in the server logs saying so.
+which lists the detected displays **by name** (e.g. `HDMI-1`) so you
+can pick the right one — this is remembered for next time and stays
+correct even on machines with 3+ displays. Moving the actual VLC
+window onto that display requires `xdotool` (installed above) — if
+it's missing, video still plays and still goes fullscreen, just
+potentially on the wrong screen, and a note appears in the server logs
+saying so.
+
+If you set a display choice with an older version of this app (before
+displays were identified by name), you'll need to re-pick it once —
+the old setting isn't carried over automatically.
 
 Use the **Fullscreen** button (web page or desktop app) any time you
 need to temporarily step out of fullscreen — no need to walk over to

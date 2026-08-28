@@ -228,9 +228,13 @@ class PlayerState:
         # Which physical display to show video on. None means
         # "auto-detect" (prefer whichever screen isn't the primary
         # one). Set explicitly via /api/video_screen if auto-detection
-        # guesses wrong for your setup.
-        self.video_screen_index = self.config.get("video_screen_index")
-        self.screens_cache = detect_screens()
+        # guesses wrong for your setup. Identified by NAME (e.g.
+        # "HDMI-1"), not list position -- a numeric index recomputed
+        # fresh from xrandr's current output order isn't stable enough
+        # once there are 3+ displays involved, since the order it's
+        # reported in can shift between the moment you pick one and the
+        # moment we actually need it.
+        self.video_screen_name = self.config.get("video_screen_name")
 
         self.fading = False
 
@@ -309,14 +313,23 @@ class PlayerState:
     def _target_screen(self):
         """Figure out which physical display should show video, or
         None if we can't tell (e.g. xrandr unavailable/Wayland) -- in
-        that case VLC just opens wherever it opens by default."""
-        screens = self.screens_cache or detect_screens()
+        that case VLC just opens wherever it opens by default.
+
+        Always re-detects fresh rather than trusting a cache, and
+        matches by display NAME rather than list position -- see the
+        comment on video_screen_name for why."""
+        screens = detect_screens()
         if not screens:
             return None
-        if self.video_screen_index is not None:
+
+        if self.video_screen_name is not None:
             for s in screens:
-                if s["index"] == self.video_screen_index:
+                if s["name"] == self.video_screen_name:
                     return s
+            print(f"[church-player] selected display {self.video_screen_name!r} "
+                  f"not found among currently detected displays "
+                  f"({[s['name'] for s in screens]}) -- falling back to auto")
+
         # Auto: prefer any screen other than the primary one, since the
         # projector is normally the secondary/extended display.
         for s in screens:
@@ -575,16 +588,15 @@ class PlayerState:
         self._safe_set_fullscreen(value)
 
     def refresh_screens(self):
-        with self.lock:
-            self.screens_cache = detect_screens()
-            return self.screens_cache
+        return detect_screens()
 
-    def set_video_screen(self, index):
-        """Change which display video shows on. If something's
-        currently showing video, reposition it immediately."""
+    def set_video_screen(self, name):
+        """Change which display video shows on (by name, e.g. 'HDMI-1',
+        or None for auto). If something's currently showing video,
+        reposition it immediately."""
         with self.lock:
-            self.video_screen_index = index
-            self.config["video_screen_index"] = index
+            self.video_screen_name = name
+            self.config["video_screen_name"] = name
             save_config(self.config)
             reposition = self.current_id is not None and self.video_enabled
             path = None
@@ -796,7 +808,7 @@ class PlayerState:
                 "length_ms": length,
                 "volume": self.desired_volume,
                 "folders": dict(self.folders),
-                "video_screen_index": self.video_screen_index,
+                "video_screen_name": self.video_screen_name,
             }
 
 
@@ -883,14 +895,14 @@ def api_fullscreen():
 @app.route("/api/screens")
 def api_screens():
     screens = state.refresh_screens()
-    return jsonify({"screens": screens, "selected_index": state.video_screen_index})
+    return jsonify({"screens": screens, "selected_name": state.video_screen_name})
 
 
 @app.route("/api/video_screen", methods=["POST"])
 def api_video_screen():
     data = request.get_json(force=True) or {}
-    index = data.get("index", None)  # null/None means "auto"
-    state.set_video_screen(int(index) if index is not None else None)
+    name = data.get("name", None)  # null/None means "auto"
+    state.set_video_screen(name if name else None)
     return jsonify(state.snapshot())
 
 

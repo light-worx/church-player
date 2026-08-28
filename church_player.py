@@ -597,13 +597,13 @@ class MainWindow(QMainWindow):
             return
 
         screens = data.get("screens", [])
-        selected_index = data.get("selected_index")
+        selected_name = data.get("selected_name")
 
         labels = ["Auto (prefer the non-primary display)"]
+        names_in_order = [None]
         for s in screens:
-            labels.append(
-                f"{s['index']}: {s['name']} ({s['width']}x{s['height']} at {s['x']},{s['y']})"
-            )
+            labels.append(f"{s['name']} ({s['width']}x{s['height']} at {s['x']},{s['y']})")
+            names_in_order.append(s["name"])
 
         if not screens:
             QMessageBox.information(
@@ -613,8 +613,8 @@ class MainWindow(QMainWindow):
             )
 
         current_row = 0
-        if selected_index is not None:
-            current_row = selected_index + 1  # offset for the "Auto" entry
+        if selected_name in names_in_order:
+            current_row = names_in_order.index(selected_name)
 
         choice, ok = QInputDialog.getItem(
             self, "Choose Video Display",
@@ -623,11 +623,9 @@ class MainWindow(QMainWindow):
         if not ok or not choice:
             return
 
-        if choice.startswith("Auto"):
-            self._api_post_safe("/api/video_screen", {"index": None})
-        else:
-            idx = int(choice.split(":")[0])
-            self._api_post_safe("/api/video_screen", {"index": idx})
+        chosen_index = labels.index(choice)
+        chosen_name = names_in_order[chosen_index]
+        self._api_post_safe("/api/video_screen", {"name": chosen_name})
 
     # ------------------------------------------------------------------
     # Progress bar
@@ -648,4 +646,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

@@ -640,13 +640,13 @@ async function loadScreens() {
 
     (data.screens || []).forEach(s => {
       const opt = document.createElement('option');
-      opt.value = s.index;
-      opt.textContent = `${s.index}: ${s.name} (${s.width}x${s.height} at ${s.x},${s.y})`;
+      opt.value = s.name;
+      opt.textContent = `${s.name} (${s.width}x${s.height} at ${s.x},${s.y})`;
       videoScreenSelect.appendChild(opt);
     });
 
-    videoScreenSelect.value = data.selected_index === null || data.selected_index === undefined
-      ? '' : String(data.selected_index);
+    videoScreenSelect.value = data.selected_name === null || data.selected_name === undefined
+      ? '' : data.selected_name;
     screensLoaded = true;
   } catch (e) {
     // Settings panel just won't have display options if this fails; not critical.
@@ -655,7 +655,7 @@ async function loadScreens() {
 
 videoScreenSelect.addEventListener('change', () => {
   const value = videoScreenSelect.value;
-  apiPost('/api/video_screen', { index: value === '' ? null : parseInt(value, 10) });
+  apiPost('/api/video_screen', { name: value === '' ? null : value });
 });
 
 loadScreens();
