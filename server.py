@@ -553,6 +553,8 @@ class PlayerState:
         """Toggle video on/off for whatever's currently playing. Only
         applies to actual video files; hot-swaps without losing your
         place if something is already playing."""
+        self.cancel_fade()  # in case this is toggled mid-fade
+
         with self.lock:
             if self.current_id is None:
                 return
@@ -568,6 +570,11 @@ class PlayerState:
             path = item["path"]
 
         current_time = self._safe_get_time()
+        # Restore volume BEFORE stopping, not after: PulseAudio/PipeWire
+        # remember a stream's volume at the moment it closes, so setting
+        # it back up only after stop() is too late to matter for what
+        # gets "remembered" for next time.
+        self._safe_audio_set_volume(self.desired_volume)
         self._safe_stop()
         media = self._make_media(path, want)
         self._safe_set_media(media)
@@ -594,6 +601,8 @@ class PlayerState:
         """Change which display video shows on (by name, e.g. 'HDMI-1',
         or None for auto). If something's currently showing video,
         reposition it immediately."""
+        self.cancel_fade()
+
         with self.lock:
             self.video_screen_name = name
             self.config["video_screen_name"] = name
@@ -609,6 +618,7 @@ class PlayerState:
 
         if reposition and path:
             current_time = self._safe_get_time()
+            self._safe_audio_set_volume(self.desired_volume)
             self._safe_stop()
             media = self._make_media(path, True)
             self._safe_set_media(media)
@@ -778,8 +788,15 @@ class PlayerState:
     def _finish_stop(self):
         with self.lock:
             self.fading = False
-        self._safe_stop()
+        # Restore volume BEFORE stopping, not after: PulseAudio/PipeWire
+        # remember a stream's volume at the moment it closes (separately
+        # from the shared sink's own volume), so setting it back up only
+        # after stop() is too late to matter for what gets "remembered"
+        # for the next stream. A brief pause gives the volume change a
+        # moment to actually register before the stream disappears.
         self._safe_audio_set_volume(self.desired_volume)
+        time.sleep(0.1)
+        self._safe_stop()
         self._reset_system_output_volume()
         with self.lock:
             self.current_id = None
