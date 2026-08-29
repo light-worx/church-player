@@ -718,9 +718,9 @@ class PlayerState:
             self._safe_audio_set_volume(new_volume)
 
     def _reset_system_output_volume(self):
-        """Directly reset the OS-level default audio sink via pactl, as
-        a mechanism-agnostic safety net alongside our own libvlc volume
-        calls.
+        """Directly reset every detected OS-level audio sink's volume
+        AND mute state via pactl, as a mechanism-agnostic safety net
+        alongside our own libvlc volume calls.
 
         This exists because fading THIS app's stream volume down can,
         on some systems, bleed through into the shared system output
@@ -728,22 +728,52 @@ class PlayerState:
         once that's happened, calling libvlc's own audio_set_volume()
         afterward isn't reliably enough to fix it, since there may be
         no live stream left for that call to act on (e.g. right after
-        stop(), or at process exit). Directly resetting the shared sink
-        sidesteps whatever the exact underlying cause is, and matters
-        beyond just this app -- a stuck-low sink affects everything
-        that plays audio on the machine, not just this player. Uses
-        pactl since that works against both real PulseAudio and
-        PipeWire's PulseAudio-compatible layer.
+        stop(), or at process exit). Directly resetting the shared
+        sink(s) sidesteps whatever the exact underlying cause is, and
+        matters beyond just this app -- a stuck-low or muted sink
+        affects everything that plays audio on the machine, not just
+        this player.
+
+        Resets volume AND mute (a separate flag from volume -- 80%
+        volume on a muted sink is still silent), and targets every
+        sink pactl reports rather than just "@DEFAULT_SINK@", in case
+        there's more than one audio device and the wrong one ends up
+        being the actual default. Uses pactl since that works against
+        both real PulseAudio and PipeWire's PulseAudio-compatible
+        layer.
         """
         try:
-            subprocess.run(
-                ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{self.desired_volume}%"],
-                capture_output=True, timeout=2,
+            result = subprocess.run(
+                ["pactl", "list", "short", "sinks"],
+                capture_output=True, text=True, timeout=2,
             )
+            sink_names = [
+                line.split("\t")[1]
+                for line in result.stdout.strip().splitlines()
+                if line.strip() and "\t" in line
+            ]
         except FileNotFoundError:
-            pass  # pactl not installed -- nothing more we can safely do here
+            print("[church-player] pactl not installed -- can't reset system "
+                  "volume/mute. Install with: sudo apt install pulseaudio-utils")
+            return
         except Exception as e:
-            print(f"[church-player] pactl sink volume reset failed: {e}")
+            print(f"[church-player] pactl list sinks failed: {e}")
+            sink_names = []
+
+        targets = sink_names or ["@DEFAULT_SINK@"]
+        for sink in targets:
+            try:
+                subprocess.run(
+                    ["pactl", "set-sink-volume", sink, f"{self.desired_volume}%"],
+                    capture_output=True, timeout=2,
+                )
+                subprocess.run(
+                    ["pactl", "set-sink-mute", sink, "0"],
+                    capture_output=True, timeout=2,
+                )
+            except Exception as e:
+                print(f"[church-player] pactl reset failed for sink {sink!r}: {e}")
+        print(f"[church-player] reset volume/mute on sink(s): {targets}")
 
     def _finish_stop(self):
         with self.lock:
