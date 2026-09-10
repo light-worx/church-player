@@ -80,6 +80,10 @@ ARTIST_PATTERN = re.compile(r"^(.*?)\s*\(([^()]+)\)\s*$")
 
 FADE_OUT_SECONDS = 3.0
 FADE_TICK_SECONDS = 0.05
+# How far down (in dB) the fade-out ramps VLC's internal equalizer
+# preamp. This is deliberately NOT the same as the volume PulseAudio
+# sees (see the fade mechanism notes on _fade_worker for why).
+FADE_PREAMP_MIN_DB = -20.0
 
 PORT = 5000
 
@@ -224,6 +228,11 @@ class PlayerState:
         self.video_enabled = False
         self.desired_volume = 80
         self.player.audio_set_volume(self.desired_volume)
+
+        # Used for the Stop fade-out. Deliberately a preamp (an
+        # internal VLC gain stage), NOT the PulseAudio-visible stream
+        # volume -- see the notes on _fade_worker for why that matters.
+        self.fade_equalizer = vlc.AudioEqualizer()
 
         # Which physical display to show video on. None means
         # "auto-detect" (prefer whichever screen isn't the primary
@@ -406,6 +415,23 @@ class PlayerState:
         except Exception as e:
             print(f"[church-player] audio_set_volume failed: {e}")
 
+    def _safe_set_preamp(self, db):
+        """Adjust VLC's internal equalizer preamp (in dB). This is the
+        fade mechanism -- it never touches the PulseAudio-visible
+        stream volume, so it can't affect what an audio server
+        "remembers" for next time. 0.0 = normal/unfaded."""
+        try:
+            self.fade_equalizer.set_preamp(db)
+            self.player.set_equalizer(self.fade_equalizer)
+        except Exception as e:
+            print(f"[church-player] set_preamp failed: {e}")
+
+    def _safe_set_mute(self, value):
+        try:
+            self.player.audio_set_mute(bool(value))
+        except Exception as e:
+            print(f"[church-player] audio_set_mute failed: {e}")
+
     def _safe_get_time(self):
         try:
             return self.player.get_time()
@@ -504,6 +530,8 @@ class PlayerState:
 
         # The actual VLC calls happen outside the lock, so a hang here
         # (e.g. a broken video output) can't block other clients.
+        self._safe_set_preamp(0.0)  # start every track unfaded
+        self._safe_set_mute(False)
         media = self._make_media(path, video_enabled)
         self._safe_set_media(media)
         self._safe_audio_set_volume(self.desired_volume)
@@ -570,12 +598,9 @@ class PlayerState:
             path = item["path"]
 
         current_time = self._safe_get_time()
-        # Restore volume BEFORE stopping, not after: PulseAudio/PipeWire
-        # remember a stream's volume at the moment it closes, so setting
-        # it back up only after stop() is too late to matter for what
-        # gets "remembered" for next time.
-        self._safe_audio_set_volume(self.desired_volume)
         self._safe_stop()
+        self._safe_set_preamp(0.0)
+        self._safe_set_mute(False)
         media = self._make_media(path, want)
         self._safe_set_media(media)
         self._safe_audio_set_volume(self.desired_volume)
@@ -618,8 +643,9 @@ class PlayerState:
 
         if reposition and path:
             current_time = self._safe_get_time()
-            self._safe_audio_set_volume(self.desired_volume)
             self._safe_stop()
+            self._safe_set_preamp(0.0)
+            self._safe_set_mute(False)
             media = self._make_media(path, True)
             self._safe_set_media(media)
             self._safe_audio_set_volume(self.desired_volume)
@@ -694,23 +720,27 @@ class PlayerState:
                 self.video_enabled = False
 
     def _start_fade_out(self):
-        try:
-            current_volume = self.player.audio_get_volume()
-        except Exception as e:
-            print(f"[church-player] audio_get_volume failed: {e}")
-            current_volume = None
-
-        if current_volume is None or current_volume <= 0:
-            self._finish_stop()
-            return
-
         with self.lock:
             self.fading = True
-        threading.Thread(
-            target=self._fade_worker, args=(current_volume,), daemon=True
-        ).start()
+        threading.Thread(target=self._fade_worker, daemon=True).start()
 
-    def _fade_worker(self, start_volume):
+    def _fade_worker(self):
+        """Ramps VLC's internal equalizer preamp down to near-silent
+        over FADE_OUT_SECONDS, then stops.
+
+        Deliberately does NOT touch audio_set_volume() (the
+        PulseAudio-visible stream volume) during the ramp. On some
+        systems, PulseAudio/PipeWire remember a stream's volume at the
+        moment it closes and apply that remembered value to future
+        streams -- so fading via that volume would either (a) leave
+        the next playback silent if we let the fade finish naturally,
+        or (b) cause an audible jump back up to full volume right
+        before cutting off, if we tried to restore it just before
+        stopping. The equalizer preamp is a gain stage entirely inside
+        VLC's own audio pipeline, invisible to PulseAudio -- so it
+        fades what you actually hear without ever giving anything
+        wrong for the audio server to remember.
+        """
         start_time = time.monotonic()
         while True:
             time.sleep(FADE_TICK_SECONDS)
@@ -720,12 +750,12 @@ class PlayerState:
                 elapsed = time.monotonic() - start_time
                 done = elapsed >= FADE_OUT_SECONDS
                 if not done:
-                    fraction_remaining = 1.0 - (elapsed / FADE_OUT_SECONDS)
-                    new_volume = max(0, int(round(start_volume * fraction_remaining)))
+                    fraction = elapsed / FADE_OUT_SECONDS
+                    preamp = FADE_PREAMP_MIN_DB * fraction
             if done:
                 self._finish_stop()
                 return
-            self._safe_audio_set_volume(new_volume)
+            self._safe_set_preamp(preamp)
 
     def _reset_system_output_volume(self):
         """Directly reset every detected OS-level audio sink's volume
@@ -788,15 +818,18 @@ class PlayerState:
     def _finish_stop(self):
         with self.lock:
             self.fading = False
-        # Restore volume BEFORE stopping, not after: PulseAudio/PipeWire
-        # remember a stream's volume at the moment it closes (separately
-        # from the shared sink's own volume), so setting it back up only
-        # after stop() is too late to matter for what gets "remembered"
-        # for the next stream. A brief pause gives the volume change a
-        # moment to actually register before the stream disappears.
-        self._safe_audio_set_volume(self.desired_volume)
-        time.sleep(0.1)
+        # The preamp fade has already brought the audible level down to
+        # near-silent by this point (see _fade_worker) -- mute for the
+        # actual stop just to make the cutoff completely clean, then
+        # reset everything (preamp, mute, and the PulseAudio-visible
+        # volume, which was never touched by the fade and should
+        # already be correct, but this is cheap insurance) so the next
+        # track starts fresh and at full, correct volume.
+        self._safe_set_mute(True)
         self._safe_stop()
+        self._safe_set_mute(False)
+        self._safe_set_preamp(0.0)
+        self._safe_audio_set_volume(self.desired_volume)
         self._reset_system_output_volume()
         with self.lock:
             self.current_id = None
@@ -804,22 +837,27 @@ class PlayerState:
             self.video_enabled = False
 
     def cancel_fade(self):
+        """Abort an in-progress fade-out (e.g. because Play was pressed
+        again, or video got toggled mid-fade) and immediately return to
+        normal, unfaded playback."""
         with self.lock:
             if not self.fading:
                 return
             self.fading = False
-        self._safe_audio_set_volume(self.desired_volume)
-        self._reset_system_output_volume()
+        self._safe_set_preamp(0.0)
 
     def restore_volume_now(self):
-        """Unconditionally push the volume back to its normal level,
-        regardless of fade state. Used as a shutdown safety net so the
-        process can never exit (whether stopped normally, restarted by
-        systemd, or killed) while a fade-out has left things quiet --
-        on many systems an app's own volume changes affect the shared
-        system volume, so this matters beyond just this app."""
+        """Unconditionally push the volume back to its normal level and
+        clear any fade state, regardless of what was happening.
+        Used as a shutdown safety net so the process can never exit
+        (whether stopped normally, restarted by systemd, or killed)
+        while a fade-out has left things quiet -- on many systems an
+        app's own volume changes affect the shared system volume, so
+        this matters beyond just this app."""
         with self.lock:
             self.fading = False
+        self._safe_set_mute(False)
+        self._safe_set_preamp(0.0)
         self._safe_audio_set_volume(self.desired_volume)
         self._reset_system_output_volume()
 
