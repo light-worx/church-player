@@ -497,15 +497,31 @@ class PlayerState:
                     print(f"[church-player] failed to move VLC window: {e}")
         self._safe_set_fullscreen(True)
 
-    def _reassert_volume_soon(self):
-        """Push the desired volume again a moment after playback starts.
-        Some audio servers (PulseAudio/PipeWire's stream-restore
-        behavior) automatically apply a remembered volume to a brand
-        new audio stream the instant it's created -- which can silently
-        override whatever we set beforehand, especially right after a
-        fade-out left the last stream at (or near) zero. Re-asserting
-        once the new stream actually exists makes sure our value wins."""
-        threading.Timer(0.3, lambda: self._safe_audio_set_volume(self.desired_volume)).start()
+    def _reassert_playback_state_soon(self):
+        """A moment after playback starts, reassert normal volume,
+        preamp, and mute state -- once, then again a bit later for
+        extra safety.
+
+        Some of these settings don't reliably "stick" if applied
+        before the new stream's audio pipeline actually exists:
+        - Audio servers (PulseAudio/PipeWire's stream-restore) can
+          apply a remembered volume to a brand new stream the instant
+          it's created, silently overriding whatever we set beforehand
+          (especially right after a fade left the last stream near
+          zero).
+        - VLC's own equalizer/preamp setting has shown the same kind
+          of issue: setting it before play() doesn't always carry over
+          once the new stream's pipeline spins up, which is what was
+          causing the *next* track after a fade to start inaudible
+          even though the volume slider looked correct.
+        Reasserting again once the stream is confirmed live makes sure
+        our values win either way."""
+        def _do():
+            self._safe_audio_set_volume(self.desired_volume)
+            self._safe_set_preamp(0.0)
+            self._safe_set_mute(False)
+        threading.Timer(0.3, _do).start()
+        threading.Timer(0.8, _do).start()
 
     def play(self, track_id, move_to_top=False, video_enabled=None):
         self.cancel_fade()
@@ -536,7 +552,7 @@ class PlayerState:
         self._safe_set_media(media)
         self._safe_audio_set_volume(self.desired_volume)
         self._safe_play()
-        self._reassert_volume_soon()
+        self._reassert_playback_state_soon()
 
         with self.lock:
             self.current_id = track_id
@@ -605,7 +621,7 @@ class PlayerState:
         self._safe_set_media(media)
         self._safe_audio_set_volume(self.desired_volume)
         self._safe_play()
-        self._reassert_volume_soon()
+        self._reassert_playback_state_soon()
 
         with self.lock:
             self.video_enabled = want
@@ -650,7 +666,7 @@ class PlayerState:
             self._safe_set_media(media)
             self._safe_audio_set_volume(self.desired_volume)
             self._safe_play()
-            self._reassert_volume_soon()
+            self._reassert_playback_state_soon()
             threading.Timer(0.3, self._apply_video_placement).start()
             if current_time and current_time > 0:
                 threading.Timer(0.3, lambda: self._safe_set_time(current_time)).start()
