@@ -229,6 +229,17 @@ class PlayerState:
         self.desired_volume = 80
         self.player.audio_set_volume(self.desired_volume)
 
+        # Bumped every time play() starts a (new or replacement) track.
+        # Background operations that apply their effects after a delay
+        # (the fade-out worker, the post-play reassertion timers)
+        # capture the generation active when they were scheduled and
+        # check it's still current before touching anything -- this
+        # stops a stale operation left over from a track that's already
+        # been superseded from clobbering whatever's actually playing
+        # now (e.g. an old fade finishing just as a new track starts,
+        # muting/stopping the NEW track instead of doing nothing).
+        self.generation = 0
+
         # Used for the Stop fade-out. Deliberately a preamp (an
         # internal VLC gain stage), NOT the PulseAudio-visible stream
         # volume -- see the notes on _fade_worker for why that matters.
@@ -497,7 +508,7 @@ class PlayerState:
                     print(f"[church-player] failed to move VLC window: {e}")
         self._safe_set_fullscreen(True)
 
-    def _reassert_playback_state_soon(self):
+    def _reassert_playback_state_soon(self, generation):
         """A moment after playback starts, reassert normal volume,
         preamp, and mute state -- once, then again a bit later for
         extra safety.
@@ -515,8 +526,16 @@ class PlayerState:
           causing the *next* track after a fade to start inaudible
           even though the volume slider looked correct.
         Reasserting again once the stream is confirmed live makes sure
-        our values win either way."""
+        our values win either way.
+
+        Only applies if `generation` still matches the current
+        playback generation -- otherwise a newer play() has already
+        superseded whatever this was scheduled for, and applying it now
+        would be reasserting state for the WRONG (stale) track."""
         def _do():
+            with self.lock:
+                if generation != self.generation:
+                    return
             self._safe_audio_set_volume(self.desired_volume)
             self._safe_set_preamp(0.0)
             self._safe_set_mute(False)
@@ -544,6 +563,13 @@ class PlayerState:
             path = item["path"]
             song = item["song"]
 
+            # New generation: any background operation still working on
+            # behalf of a previous track (a fade winding down, a delayed
+            # reassertion) will see this and know to leave the new track
+            # alone rather than muting/stopping it by mistake.
+            self.generation += 1
+            my_generation = self.generation
+
         # The actual VLC calls happen outside the lock, so a hang here
         # (e.g. a broken video output) can't block other clients.
         self._safe_set_preamp(0.0)  # start every track unfaded
@@ -552,7 +578,7 @@ class PlayerState:
         self._safe_set_media(media)
         self._safe_audio_set_volume(self.desired_volume)
         self._safe_play()
-        self._reassert_playback_state_soon()
+        self._reassert_playback_state_soon(my_generation)
 
         with self.lock:
             self.current_id = track_id
@@ -612,6 +638,8 @@ class PlayerState:
             if want == self.video_enabled:
                 return
             path = item["path"]
+            self.generation += 1
+            my_generation = self.generation
 
         current_time = self._safe_get_time()
         self._safe_stop()
@@ -621,7 +649,7 @@ class PlayerState:
         self._safe_set_media(media)
         self._safe_audio_set_volume(self.desired_volume)
         self._safe_play()
-        self._reassert_playback_state_soon()
+        self._reassert_playback_state_soon(my_generation)
 
         with self.lock:
             self.video_enabled = want
@@ -656,6 +684,9 @@ class PlayerState:
                     path = found[2]["path"]
                 else:
                     reposition = False
+            if reposition:
+                self.generation += 1
+                my_generation = self.generation
 
         if reposition and path:
             current_time = self._safe_get_time()
@@ -666,7 +697,7 @@ class PlayerState:
             self._safe_set_media(media)
             self._safe_audio_set_volume(self.desired_volume)
             self._safe_play()
-            self._reassert_playback_state_soon()
+            self._reassert_playback_state_soon(my_generation)
             threading.Timer(0.3, self._apply_video_placement).start()
             if current_time and current_time > 0:
                 threading.Timer(0.3, lambda: self._safe_set_time(current_time)).start()
@@ -737,10 +768,17 @@ class PlayerState:
 
     def _start_fade_out(self):
         with self.lock:
+            # Bump the generation here too: this invalidates any
+            # still-pending post-play reassertion timers from whatever
+            # play() started the track now being faded out, so they
+            # can't fire mid-fade and stomp the preamp back to 0,
+            # undoing the fade.
+            self.generation += 1
+            my_generation = self.generation
             self.fading = True
-        threading.Thread(target=self._fade_worker, daemon=True).start()
+        threading.Thread(target=self._fade_worker, args=(my_generation,), daemon=True).start()
 
-    def _fade_worker(self):
+    def _fade_worker(self, generation):
         """Ramps VLC's internal equalizer preamp down to near-silent
         over FADE_OUT_SECONDS, then stops.
 
@@ -756,19 +794,32 @@ class PlayerState:
         VLC's own audio pipeline, invisible to PulseAudio -- so it
         fades what you actually hear without ever giving anything
         wrong for the audio server to remember.
+
+        Checks `generation` on every tick (not just `fading`) before
+        touching anything: if a new play() has started a different
+        track since this fade began, `fading` gets cleared by
+        cancel_fade() as usual, but the generation check is a second,
+        independent guard against the rare case where this worker is
+        right on the verge of calling _finish_stop() (which would mute
+        and stop) at the exact moment a new track starts -- without it,
+        a stale fade finishing late could cut off/mute a track that
+        only just started playing.
         """
         start_time = time.monotonic()
         while True:
             time.sleep(FADE_TICK_SECONDS)
             with self.lock:
-                if not self.fading:
-                    return  # cancelled
+                if not self.fading or generation != self.generation:
+                    return  # cancelled, or superseded by a newer track
                 elapsed = time.monotonic() - start_time
                 done = elapsed >= FADE_OUT_SECONDS
                 if not done:
                     fraction = elapsed / FADE_OUT_SECONDS
                     preamp = FADE_PREAMP_MIN_DB * fraction
             if done:
+                with self.lock:
+                    if generation != self.generation:
+                        return  # superseded right at the finish line
                 self._finish_stop()
                 return
             self._safe_set_preamp(preamp)
