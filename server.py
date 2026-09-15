@@ -642,9 +642,9 @@ class PlayerState:
             my_generation = self.generation
 
         current_time = self._safe_get_time()
-        self._safe_stop()
         self._safe_set_preamp(0.0)
         self._safe_set_mute(False)
+        self._safe_stop()
         media = self._make_media(path, want)
         self._safe_set_media(media)
         self._safe_audio_set_volume(self.desired_volume)
@@ -690,9 +690,9 @@ class PlayerState:
 
         if reposition and path:
             current_time = self._safe_get_time()
-            self._safe_stop()
             self._safe_set_preamp(0.0)
             self._safe_set_mute(False)
+            self._safe_stop()
             media = self._make_media(path, True)
             self._safe_set_media(media)
             self._safe_audio_set_volume(self.desired_volume)
@@ -886,17 +886,18 @@ class PlayerState:
         with self.lock:
             self.fading = False
         # The preamp fade has already brought the audible level down to
-        # near-silent by this point (see _fade_worker) -- mute for the
-        # actual stop just to make the cutoff completely clean, then
-        # reset everything (preamp, mute, and the PulseAudio-visible
-        # volume, which was never touched by the fade and should
-        # already be correct, but this is cheap insurance) so the next
-        # track starts fresh and at full, correct volume.
-        self._safe_set_mute(True)
-        self._safe_stop()
+        # near-silent by this point (see _fade_worker). Deliberately do
+        # NOT mute before stop() -- that reintroduces the exact same
+        # bug volume had: whatever remembers a stream's state at the
+        # moment it closes (PulseAudio/PipeWire stream-restore) would
+        # remember "muted", and apply that to the NEXT stream created --
+        # including a completely separate VLC window, not just this
+        # app. So instead, set everything to its correct final state
+        # BEFORE stopping, exactly like we do for volume.
         self._safe_set_mute(False)
         self._safe_set_preamp(0.0)
         self._safe_audio_set_volume(self.desired_volume)
+        self._safe_stop()
         self._reset_system_output_volume()
         with self.lock:
             self.current_id = None
